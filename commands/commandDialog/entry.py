@@ -1,5 +1,7 @@
 import adsk.core
 import os
+
+import adsk.fusion
 from ...lib import fusion360utils as futil
 from ... import config
 app = adsk.core.Application.get()
@@ -112,6 +114,8 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     default_value = adsk.core.ValueInput.createByString('1')
     inputs.addValueInput('value_input', 'Some Value', defaultLengthUnits, default_value)
 
+    create_sketch()
+
     # TODO Connect to the events that are needed by this command.
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.inputChanged, command_input_changed, local_handlers=local_handlers)
@@ -139,6 +143,9 @@ def command_execute(args: adsk.core.CommandEventArgs):
     msg = f'Your text: {text}<br>Your value: {expression}'
     ui.messageBox(msg)
 
+    create_sketch()
+
+
 
 # This event handler is called when the command needs to compute a new preview in the graphics window.
 def command_preview(args: adsk.core.CommandEventArgs):
@@ -160,6 +167,9 @@ def command_input_changed(args: adsk.core.InputChangedEventArgs):
         # Change image according to new value
         # Change parameters according to new value
         pass
+    elif changed_input_id == "texture_depth_input":
+        # TODO Put this part into the command_preview function instead.
+        set_depth_dimension(changed_input.value)
 
     # General logging for debug.
     futil.log(f'{CMD_NAME} Input Changed Event fired from a change to {changed_input.id}')
@@ -185,6 +195,125 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
 def command_destroy(args: adsk.core.CommandEventArgs):
     # General logging for debug.
     futil.log(f'{CMD_NAME} Command Destroy Event')
-
+    delete_sketch()
     global local_handlers
     local_handlers = []
+
+# TODO Create_sketch function needs input arguments for depth width and flank angel. Alternatively, use attributes of the component or user parameters for this.
+def create_sketch():
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        ui.messageBox("Sketch not created. No active Fusion design", "No Design")
+        return
+    
+    # Get the active component of the active design
+    component : adsk.fusion.Component = design.activeComponent # Use type hints between ":" and "=" to make code completion work properly
+
+    # Create a sketch on the yz plane
+    sketches = component.sketches
+    sketchPlane = component.xZConstructionPlane
+    sketch = sketches.add(sketchPlane)
+
+    # Draw the shape
+    points = adsk.core.Point3D
+    lines = sketch.sketchCurves.sketchLines
+    arcs = sketch.sketchCurves.sketchArcs
+
+    ## Define corner points (all units in cm)
+    point0 = points.create(0, 0, 0)
+    point1 = points.create(0.1, 0, 0)
+    point2 = points.create(-0.1, 0, 0)
+    point3 = points.create(-0.05, 0.07, 0)
+    point4 = points.create(0.05, 0.07, 0)
+    pointDepth = points.create(0, 0.1, 0)
+
+    ## Draw lines
+    lineTop = lines.addByTwoPoints(point1, point2)
+    lineLeft = lines.addByTwoPoints(lineTop.endSketchPoint, point3)
+    arcBottom = arcs.addByThreePoints(point4, pointDepth, lineLeft.endSketchPoint)
+    lineRight = lines.addByTwoPoints(arcBottom.startSketchPoint, lineTop.startSketchPoint)
+
+    midline = sketch.project(component.zConstructionAxis).item(0)
+    midline.isCenterLine = True
+
+    topRef = sketch.project(component.xConstructionAxis).item(0)
+    topRef.isConstruction = True
+
+    depthRef = lines.addByTwoPoints(point0, pointDepth)
+    depthRef.isConstruction = True
+
+    # Add geometric constraints
+    geomConstraints = sketch.geometricConstraints
+
+    ## Tangent constraints of arc
+    geomConstraints.addTangent(arcBottom, lineLeft)
+    geomConstraints.addTangent(arcBottom, lineRight)
+
+    ## Symmetry constraint of flanks
+    geomConstraints.addSymmetry(lineLeft, lineRight, midline)
+
+    ## Coincident constraints
+    geomConstraints.addCoincident(lineTop.endSketchPoint, topRef)
+    geomConstraints.addCoincident(lineTop.startSketchPoint, topRef)
+    geomConstraints.addCoincident(depthRef.startSketchPoint, topRef)
+    geomConstraints.addCoincident(depthRef.endSketchPoint, arcBottom)
+
+    ## Collinear constraints
+    geomConstraints.addCollinear(depthRef, midline)
+
+    # Add sketch dimensions
+    dimensions = sketch.sketchDimensions
+    flankAngleDimension = dimensions.addAngularDimension(lineRight, lineLeft, points.create(0,-0.2,0))
+    widthDimension = dimensions.addDistanceDimension(lineTop.endSketchPoint, lineTop.startSketchPoint, 1, points.create(0,-0.02,0))
+    depthDimension = dimensions.addDistanceDimension(depthRef.endSketchPoint, depthRef.startSketchPoint, 2, points.create(0.02,0.02,0))
+    add_single_attribute(design, sketch, "Surface-Texture-Creator", "Feature_Sketch", "")
+    add_single_attribute(design, flankAngleDimension, "Surface-Texture-Creator", "flankAngleDimension", "")
+    add_single_attribute(design, widthDimension, "Surface-Texture-Creator", "widthDimension", "")
+    add_single_attribute(design, depthDimension, "Surface-Texture-Creator", "depthDimension", "")
+
+def update_sketch():
+    sketch = retrieve_feature_sketch()
+
+def delete_sketch():
+    sketch = retrieve_feature_sketch()
+    sketch.deleteMe()
+
+def add_single_attribute(design, entity, groupName, attributeName, value):
+    attrib = entity.attributes.itemByName(groupName, attributeName)
+    if not attrib:
+        # Get any existing attributes with this name and delete them.
+        oldAttribs = design.findAttributes(groupName, attributeName)
+        for oldAttrib in oldAttribs:
+            oldAttrib.deleteMe()
+
+        # Add the attribute to the specified entity.
+        entity.attributes.add(groupName, attributeName, str(value))
+
+def retrieve_feature_sketch():
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    return design.findAttributes("Surface-Texture-Creator", "Feature_Sketch")[0].parent
+
+def retrieve_flank_angle_dimension():
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    return design.findAttributes("Surface-Texture-Creator", "flankAngleDimension")[0].parent
+
+def retrieve_width_dimension():
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    return design.findAttributes("Surface-Texture-Creator", "widthDimension")[0].parent
+
+def retrieve_depth_dimension():
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    return design.findAttributes("Surface-Texture-Creator", "depthDimension")[0].parent
+
+# TODO For set functions it might be necessary to use expressions instead of values
+def set_flank_angle(angle):
+    flankAngleDimension = retrieve_flank_angle_dimension()
+    flankAngleDimension.value = angle
+
+def set_width_dimension(width):
+    widthDimension = retrieve_width_dimension()
+    widthDimension.value = width
+
+def set_depth_dimension(depth):
+    depthDimension = retrieve_depth_dimension()
+    depthDimension.parameter.value = depth
