@@ -8,11 +8,12 @@ import math
 app = adsk.core.Application.get()
 ui = app.userInterface
 
+# TODO Major rework using OOP to keep a reference to model parameters and geometry. (Improve performance)
 
 # TODO *** Specify the command identity information. ***
 CMD_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_cmdDialog'
 CMD_NAME = 'Command Dialog Sample'
-CMD_Description = 'A Fusion 360 Add-in Command with a dialog'
+CMD_Description = 'A Fusion 360 Add-in to create models for 2.5D laser surface texturing.'
 
 # Specify that the command will be promoted to the panel.
 IS_PROMOTED = True
@@ -32,6 +33,7 @@ ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resource
 # they are not released and garbage collected.
 local_handlers = []
 _selected_ok = False
+_texture_selector_changed = False
 
 # Executed when add-in is run.
 def start():
@@ -99,7 +101,7 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
 
     # Create a value input field for the texture period and set the default using 1 unit of the default length unit.
     defaultLengthUnits = app.activeProduct.unitsManager.defaultLengthUnits
-    default_value = adsk.core.ValueInput.createByString('1')
+    default_value = adsk.core.ValueInput.createByString('3 mm')
     period_input = inputs.addDistanceValueCommandInput('texture_period_input', 'Texture period', default_value)
     period_input.setManipulator(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(0,1,0))
 
@@ -109,7 +111,7 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     depth_input.setManipulator(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(0,0,-1))
     
     # Create a distance input field for the flank width and set the default to 2 mm. Set the 3D manipulator in width direction.
-    default_value = adsk.core.ValueInput.createByString('2 mm')
+    default_value = adsk.core.ValueInput.createByString('1 mm')
     width_input = inputs.addDistanceValueCommandInput('texture_width_input', 'Texture width', default_value)
     width_input.setManipulator(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(1,0,0))
 
@@ -122,14 +124,12 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     flank_angle_input.setManipulator(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(1,0,0), adsk.core.Vector3D.create(0,0,1))
 
     create_sketch(inputs)
-    extrude_sketch(inputs)
-    create_pattern(inputs)
 
     # TODO Connect to the events that are needed by this command.
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.inputChanged, command_input_changed, local_handlers=local_handlers)
     futil.add_handler(args.command.executePreview, command_preview, local_handlers=local_handlers)
-    futil.add_handler(args.command.validateInputs, command_validate_input, local_handlers=local_handlers)
+    #futil.add_handler(args.command.validateInputs, command_validate_input, local_handlers=local_handlers)
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
 
 
@@ -147,7 +147,6 @@ def command_execute(args: adsk.core.CommandEventArgs):
     global _selected_ok
     _selected_ok = True
 
-    # TODO Replace these lines with changing the dimensions inside the sketch.
     flank_angle = inputs.itemById('texture_flank_angle_input').value
     depth = inputs.itemById('texture_depth_input').value
     width = inputs.itemById("texture_width_input").value
@@ -156,18 +155,7 @@ def command_execute(args: adsk.core.CommandEventArgs):
     set_depth_dimension(depth)
     set_width_dimension(width)
 
-    period_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_period_input")
-    period = period_input.value
-    set_extrude_dimension(period)
-
-    #text_box: adsk.core.TextBoxCommandInput = inputs.itemById('text_box')
-    #value_input: adsk.core.ValueCommandInput = inputs.itemById('value_input')
-
-    # Do something interesting
-    #text = text_box.text
-    #expression = value_input.expression
-    #msg = f'Your text: {text}<br>Your value: {expression}'
-    #ui.messageBox("Executed")
+    create_texture(inputs)
 
 
 # This event handler is called when the command needs to compute a new preview in the graphics window.
@@ -175,8 +163,12 @@ def command_preview(args: adsk.core.CommandEventArgs):
     # General logging for debug.
     futil.log(f'{CMD_NAME} Command Preview Event')
     inputs = args.command.commandInputs
+    global _texture_selector_changed
+    
+    create_texture(inputs)
 
-
+    # TODO Optimisation suggestion: Use different configurations and model parameters to change the dimensions and texture type. Delete unnecessary configurations on command execution.
+    
     # TODO Put all the geometry changes from inputs here
     depth_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_depth_input")
     depth = depth_input.value
@@ -190,9 +182,7 @@ def command_preview(args: adsk.core.CommandEventArgs):
     width = width_input.value
     set_width_dimension(width)
 
-    period_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_period_input")
-    period = period_input.value
-    set_extrude_dimension(period)
+    
 
 # This event handler is called when the user changes anything in the command dialog
 # allowing you to modify values of other inputs based on that change.
@@ -206,7 +196,8 @@ def command_input_changed(args: adsk.core.InputChangedEventArgs):
         # TODO Get new value of selector
         # Change image according to new value
         # Change parameters according to new value
-        pass
+        global _texture_selector_changed
+        _texture_selector_changed = True
 
     # General logging for debug.
     futil.log(f'{CMD_NAME} Input Changed Event fired from a change to {changed_input.id}')
@@ -221,11 +212,6 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
     inputs = args.inputs
     
     # Verify the validity of the input values. This controls if the OK button is enabled or not.
-    valueInput = inputs.itemById('value_input')
-    if valueInput.value >= 0:
-        args.areInputsValid = True
-    else:
-        args.areInputsValid = False
         
 
 # This event handler is called when the command terminates.
@@ -234,7 +220,7 @@ def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
     global _selected_ok
     if not _selected_ok:
-        delete_sketch()
+        delete_all()
     #ui.messageBox("Destroyed")
     global local_handlers
     local_handlers = []
@@ -280,7 +266,6 @@ def create_sketch(inputs: adsk.core.CommandInputs):
     topRef.isConstruction = True
 
     depthRef = lines.addByTwoPoints(point0, pointDepth)
-    depthRef.isConstruction = True
 
     # Add geometric constraints
     geomConstraints = sketch.geometricConstraints
@@ -318,9 +303,26 @@ def create_sketch(inputs: adsk.core.CommandInputs):
     width = inputs.itemById("texture_width_input").value
     set_width_dimension(width)
 
-def delete_sketch():
-    sketch = get_feature_sketch()
-    sketch.deleteMe()
+def create_texture(inputs):
+    texture_selector_input : adsk.core.DropDownCommandInput = inputs.itemById("texture_type_input")
+    texture_type = texture_selector_input.selectedItem.name
+
+    match texture_type:
+        case "Dots":
+            make_dots(inputs)
+            create_rectangular_pattern(inputs)
+        case "Lines":
+            make_line(inputs)
+            create_rectangular_pattern(inputs)
+        case "Hatch":
+            make_line(inputs)
+            create_circular_pattern(inputs)
+            create_rectangular_pattern(inputs)
+    
+    if texture_type == "Lines":
+        period_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_period_input")
+        period = period_input.value
+        #set_extrude_dimension(period)
 
 def add_single_attribute(design, entity, groupName, attributeName, value):
     attrib = entity.attributes.itemByName(groupName, attributeName)
@@ -333,74 +335,151 @@ def add_single_attribute(design, entity, groupName, attributeName, value):
         # Add the attribute to the specified entity.
         entity.attributes.add(groupName, attributeName, str(value))
 
-def get_feature_sketch() -> adsk.fusion.Sketch:
+def feature_getter(attribute_name:str):
     design = adsk.fusion.Design.cast(app.activeProduct)
-    return design.findAttributes("Surface-Texture-Creator", "Feature_Sketch")[0].parent
+    attribute = design.findAttributes("Surface-Texture-Creator", attribute_name)
+    if len(attribute)>0:
+        return attribute[0].parent
+    else:
+        return None
+
+def get_feature_sketch() -> adsk.fusion.Sketch:
+    return feature_getter("Feature_Sketch")
 
 def get_flank_angle_dimension() -> adsk.fusion.SketchAngularDimension:
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    return design.findAttributes("Surface-Texture-Creator", "flankAngleDimension")[0].parent
+    return feature_getter("flankAngleDimension")
 
 def get_width_dimension() -> adsk.fusion.SketchLinearDimension:
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    return design.findAttributes("Surface-Texture-Creator", "widthDimension")[0].parent
+    return feature_getter("widthDimension")
 
 def get_depth_dimension() -> adsk.fusion.SketchLinearDimension:
-    design = adsk.fusion.Design.cast(app.activeProduct)
-    return design.findAttributes("Surface-Texture-Creator", "depthDimension")[0].parent
+    return feature_getter("depthDimension")
 
-def set_extrude_dimension(value):
+def set_extrude_dimension(value : float):
     extrude = get_extrude_feature()
     sym_def : adsk.fusion.SymmetricExtentDefinition = extrude.extentOne
     distance : adsk.fusion.ModelParameter = sym_def.distance
     distance.value = value
 
-def get_extrude_feature() -> adsk.fusion.ExtrudeFeature:
-    design : adsk.fusion.Design = app.activeProduct
-    return design.findAttributes("Surface-Texture-Creator", "ExtrudeFeature")[0].parent
+def get_extrude_feature() -> (adsk.fusion.ExtrudeFeature | None):
+    return feature_getter("ExtrudeFeature")
     
-def set_flank_angle_dimension(angle):
+def set_flank_angle_dimension(angle : float):
     flankAngleDimension = get_flank_angle_dimension()
     flankAngleDimension.value = angle
 
-def set_width_dimension(width):
+def set_width_dimension(width : float):
     widthDimension = get_width_dimension()
     widthDimension.value = width
 
-def set_depth_dimension(depth):
+def set_depth_dimension(depth : float):
     depthDimension = get_depth_dimension()
     depthDimension.value = depth
 
-def extrude_sketch(inputs : adsk.core.CommandInputs):
+def make_line(inputs : adsk.core.CommandInputs):
     design : adsk.fusion.Design = app.activeProduct
-    
+
     # Get the active component of the active design
     component : adsk.fusion.Component = design.activeComponent
     extrudes = component.features.extrudeFeatures
 
     sketch = get_feature_sketch()
-    profile = sketch.profiles.item(0)
+    profiles = [sketch.profiles.item(0), sketch.profiles.item(1)]
+    profiles = adsk.core.ObjectCollection.createWithArray(profiles)
     texture_period = inputs.itemById('texture_period_input').expression
     default_value = adsk.core.ValueInput.createByString(texture_period)
     
-    extrude_input = extrudes.createInput(profile, 3)
+    extrude_input = extrudes.createInput(profiles, 3)
     extrude_input.setSymmetricExtent(default_value, True)
     extrude = extrudes.add(extrude_input)
 
     add_single_attribute(design, extrude, "Surface-Texture-Creator", "ExtrudeFeature","")
 
-def revolve_sketch(inputs : adsk.core.CommandInputs):
-    pass
+def make_dots(inputs : adsk.core.CommandInputs):
+    
+    design : adsk.fusion.Design = app.activeProduct
+    
+    # Get the active component
+    component : adsk.fusion.Component = design.activeComponent
+    revolves = component.features.revolveFeatures
 
-def get_revolve_feature() -> adsk.fusion.RevolveFeature:
-    pass
+    sketch = get_feature_sketch()
+    profile = sketch.profiles.item(0)
 
-def create_pattern(inputs : adsk.core.CommandInputs):
+    revolve_axis = component.zConstructionAxis
+
+    revolve_input = revolves.createInput(profile, revolve_axis, 3)
+    revolve_angle = adsk.core.ValueInput.createByString("360degree")
+    revolve_input.setAngleExtent(isSymmetric=True, angle=revolve_angle)
+
+    revolve = revolves.add(revolve_input)
+
+    add_single_attribute(design, revolve, "Surface-Texture-Creator", "RevolveFeature","")
+
+def get_revolve_feature() -> (adsk.fusion.RevolveFeature | None):
+    return feature_getter("RevolveFeature")
+
+def create_rectangular_pattern(inputs : adsk.core.CommandInputs):
+    design : adsk.fusion.Design = app.activeProduct
+    component : adsk.fusion.Component = design.activeComponent
+
+    rectangular_patterns = component.features.rectangularPatternFeatures
+
+    texture_selector_input : adsk.core.DropDownCommandInput = inputs.itemById("texture_type_input")
+    texture_type = texture_selector_input.selectedItem.name
+
+    input_entities = adsk.core.ObjectCollection.create()
+    x_axis = component.xConstructionAxis
+    y_axis = component.yConstructionAxis
+
+    add_second_direction = True
+
+    match texture_type:
+        case "Dots":
+            revolve = get_revolve_feature()
+            input_entities.add(revolve)
+
+        case "Lines":
+            extrude = get_extrude_feature()
+            input_entities.add(extrude)
+            add_second_direction = False
+
+        case "Hatch":
+            extrude = get_extrude_feature()
+            circular_pattern = get_circular_pattern_feature()
+            combine_feature = get_combine_feature()
+            input_entities.add(extrude)
+            input_entities.add(circular_pattern)
+            input_entities.add(combine_feature)
+    
+    quantity = adsk.core.ValueInput.createByReal(2)
+    distance_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_period_input")
+    distance = adsk.core.ValueInput.createByReal(distance_input.value)
+
+    rectangular_pattern_input = rectangular_patterns.createInput(input_entities, x_axis, quantity, distance, 1)
+    if add_second_direction:
+        rectangular_pattern_input.setDirectionTwo(y_axis, quantity, distance)
+
+    rectangular_pattern = rectangular_patterns.add(rectangular_pattern_input)
+    combine_features = component.features.combineFeatures
+    target_body = rectangular_pattern.bodies.item(0)
+    tool_body = adsk.core.ObjectCollection.create()
+    for i in range(1, 4):
+        tool_body.add(rectangular_pattern.bodies.item(i))
+    combine_feature_input = combine_features.createInput(target_body, tool_body)
+    combine_features.add(combine_feature_input)
+
+    add_single_attribute(design, rectangular_patterns.item(0), "Surface-Texture-Creator", "RectangularPattern","")
+
+def get_rectangular_pattern() -> (adsk.fusion.RectangularPatternFeature | None):
+    return feature_getter("RectangularPattern")
+
+
+def create_circular_pattern(inputs : adsk.core.CommandInputs):
     design : adsk.fusion.Design = app.activeProduct
     component : adsk.fusion.Component = design.activeComponent
 
     circular_patterns = component.features.circularPatternFeatures
-    rectangular_patterns = component.features.rectangularPatternFeatures
     extrude = get_extrude_feature()
     input_entities = adsk.core.ObjectCollection.create()
     input_entities.add(extrude)
@@ -420,6 +499,41 @@ def create_pattern(inputs : adsk.core.CommandInputs):
     combine_feature_input = combine_features.createInput(target_body, tool_body)
     combine_features.add(combine_feature_input)
 
+    add_single_attribute(design, circular_pattern, "Surface-Texture-Creator", "CircularPattern","")
+    add_single_attribute(design, combine_features.item(0), "Surface-Texture-Creator", "CombineFeature","")
+
+def get_combine_feature():
+    return feature_getter("CombineFeature")
+
+def get_circular_pattern_feature() -> (adsk.fusion.CombineFeature | None):
+    return feature_getter("CircularPattern")
+
+def deleter(getter:callable)->bool:
+    to_delete = getter()
+    if to_delete is not None:
+        to_delete.deleteMe()
+        return True
+    else:
+        return False
+
+def delete_sketch():
+    deleter(get_feature_sketch)
+
+def delete_extrude() -> bool:
+    deleter(get_extrude_feature)
+
+
+def delete_revolve() -> bool:
+    deleter(get_revolve_feature)
+    
+def delete_pattern() -> bool:
+    deleter(get_circular_pattern_feature)
+
+def delete_all():
+    delete_sketch()
+    delete_extrude()
+    delete_revolve()
+    delete_pattern()
 
 
     # TODO Check the texture selector input and use linear or circular pattern accordingly.
