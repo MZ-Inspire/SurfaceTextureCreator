@@ -130,26 +130,32 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
 
     # Create a value input field for the texture period and set the default using 1 unit of the default length unit.
     period_input = inputs.addDistanceValueCommandInput('texture_period_input', 'Texture period', default_period_value)
+    period_input.minimumValue = 0.0
+    period_input.isMinimumValueInclusive = False
     period_input.setManipulator(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(0,1,0))
 
     # Create a distance input field for the texture depth and set the default to 1 mm. Set the 3D manipulator in depth direction.
     depth_input = inputs.addDistanceValueCommandInput('texture_depth_input', 'Texture depth', default_depth)
-    depth_input.minimumValue = 0
     depth_input.isMinimumValueInclusive = False
+    depth_input.isMaximumValueInclusive = False
     depth_input.setManipulator(adsk.core.Point3D.create(0,0,0), adsk.core.Vector3D.create(0,0,-1))
     
     # Create a distance input field for the flank width and set the default to 2 mm. Set the 3D manipulator in width direction.
     width_input = inputs.addDistanceValueCommandInput('texture_width_input', 'Texture width', default_width)
-    width_input.minimumValue = 0
     width_input.isMinimumValueInclusive = False
+    width_input.isMaximumValueInclusive = False
     width = width_input.value
     width_input.setManipulator(adsk.core.Point3D.create(-width/2,0,0), adsk.core.Vector3D.create(1,0,0))
 
     # Create an angle input field for the flank angle and set the default to 1 mm. Set the 3D manipulator on the X-Z-plane.
     flank_angle_input = inputs.addAngleValueCommandInput('texture_flank_angle_input', 'Flank angle', default_angle_value)
-    flank_angle_input.maximumValue = math.pi/2
     flank_angle_input.isMaximumValueInclusive = False
+    flank_angle_input.isMinimumValueInclusive = True
     flank_angle_input.setManipulator(adsk.core.Point3D.create(width/2,0,0), adsk.core.Vector3D.create(0,0,-1), adsk.core.Vector3D.create(-1,0,0))
+
+    set_depth_boundaries(inputs)
+    set_width_boundaries(inputs)
+    set_flank_angle_boundaries(inputs)
 
     create_sketch(inputs)
 
@@ -227,8 +233,6 @@ def command_input_changed(args: adsk.core.InputChangedEventArgs):
 
     inputs = args.inputs
     previous_input = inputs.itemById(changed_input_id)
-
-    inputs.addBoolValueInput("test_input", "test input", True)
     
     global _input_changed_id
     _input_changed_id = changed_input_id
@@ -242,16 +246,20 @@ def command_input_changed(args: adsk.core.InputChangedEventArgs):
             _texture_selector_changed = True
         
         case "texture_depth_input":
-            pass
+            set_width_boundaries(inputs)
+            set_flank_angle_boundaries(inputs)
 
         case "texture_width_input":
             width = changed_input.value
             flank_angle_input : adsk.core.AngleValueCommandInput = inputs.itemById("texture_flank_angle_input")
             flank_angle_input.setManipulator(adsk.core.Point3D.create(width/2,0,0), adsk.core.Vector3D.create(0,0,-1), adsk.core.Vector3D.create(-1,0,0))
             changed_input.setManipulator(adsk.core.Point3D.create(-width/2,0,0), adsk.core.Vector3D.create(1,0,0))
+            set_depth_boundaries(inputs)
+            set_flank_angle_boundaries(inputs)
 
         case "texture_flank_angle_input":
-            pass
+            set_depth_boundaries(inputs)
+            set_width_boundaries(inputs)
 
 
 # This event handler is called when the user interacts with any of the inputs in the dialog
@@ -261,13 +269,6 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
     futil.log(f'{CMD_NAME} Validate Input Event')
 
     inputs = args.inputs
-
-    flank_angle : float = inputs.itemById("texture_flank_angle_input").value
-    width : float = inputs.itemById("texture_width_input").value
-    depth : float = inputs.itemById("texture_depth_input").value
-
-    inputs_valid = width >= 2*depth*math.tan(flank_angle/2)
-
     
     # Verify the validity of the input values. This controls if the OK button is enabled or not.
         
@@ -378,7 +379,7 @@ def create_sketch(inputs : adsk.core.CommandInputs):
 
     # Add sketch dimensions
     dimensions = sketch.sketchDimensions
-    flankAngleDimension = dimensions.addAngularDimension(lineMiddle, line_right, points.create(width/2,-0.2,0))
+    flankAngleDimension = dimensions.addAngularDimension(line_top_right, line_right, points.create(width/4,depth/2,0))
     widthDimension = dimensions.addDistanceDimension(line_top_right.startSketchPoint, line_top_left.startSketchPoint, 1, points.create(0,-0.02,0))
     depthDimension = dimensions.addDistanceDimension(lineMiddle.endSketchPoint, lineMiddle.startSketchPoint, 2, points.create(0.02,0.02,0))
     
@@ -386,7 +387,7 @@ def create_sketch(inputs : adsk.core.CommandInputs):
     add_single_attribute(design, sketch, "Surface-Texture-Creator", "Feature_Sketch", "")
 
     # Connect the sketch dimesions to the user parameters
-    flankAngleDimension.parameter.expression = "Texture_flank_angle"
+    flankAngleDimension.parameter.expression = "90 - Texture_flank_angle"
     depthDimension.parameter.expression = "Texture_depth"
     widthDimension.parameter.expression = "Texture_width"
 
@@ -604,6 +605,42 @@ def get_combine_feature():
 
 def get_circular_pattern_feature() -> (adsk.fusion.CombineFeature | None):
     return feature_getter("CircularPattern")
+
+def set_depth_boundaries(inputs : adsk.core.CommandInputs):
+    depth_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_depth_input")
+    flank_angle = inputs.itemById("texture_flank_angle_input").value
+    width = inputs.itemById("texture_width_input").value
+    precision = get_distance_precision()
+    depth_input.minimumValue = 0.5*width*(1-math.sin(flank_angle))/(math.cos(flank_angle))+math.pow(10,-precision-1)
+    if flank_angle > 0:
+        depth_input.maximumValue = 0.5*width/math.tan(flank_angle)-math.pow(10,-precision-1)
+    else:
+        depth_input.hasMaximumValue = False
+
+def set_width_boundaries(inputs : adsk.core.CommandInputs):
+    width_input : adsk.core.DistanceValueCommandInput = inputs.itemById("texture_width_input")
+    depth = inputs.itemById("texture_depth_input").value
+    flank_angle = inputs.itemById("texture_flank_angle_input").value
+    precision = get_distance_precision()
+    width_input.minimumValue = 2*depth*math.tan(flank_angle)+math.pow(10,-precision-1)
+    width_input.maximumValue = 2*depth*(math.cos(flank_angle))/(1-math.sin(flank_angle))-math.pow(10,-precision-1)
+
+def set_flank_angle_boundaries(inputs : adsk.core.CommandInputs):
+    flank_angle_input : adsk.core.AngleValueCommandInput = inputs.itemById("texture_flank_angle_input")
+    width = inputs.itemById("texture_width_input").value
+    depth = inputs.itemById("texture_depth_input").value
+    precision = get_angle_precision()
+    flank_angle_input.maximumValue = math.atan(width/(2*depth))-math.pow(10,-precision-1)
+
+def get_angle_precision() -> float:
+    preferences = app.preferences
+    precision = preferences.unitAndValuePreferences.angularPrecision
+    return precision
+
+def get_distance_precision() -> float:
+    preferences = app.preferences
+    precision = preferences.unitAndValuePreferences.generalPrecision
+    return precision
 
 def deleter(getter:callable)->bool:
     to_delete = getter()
